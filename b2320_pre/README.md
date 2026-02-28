@@ -24,6 +24,8 @@ run
 ---
 python zipzopzoop.py
 
+Check the **dry-run** checkbox to preview all flattening steps without modifying the outer zip file. All log entries will be tagged with [DRY-RUN].
+
 Simply 
 ---------------------------
 1. look for zip files in every dropped folder

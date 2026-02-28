@@ -4,7 +4,7 @@ from pathlib import Path
 from PyQt5.QtCore   import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QListWidget, QPushButton,
-    QLabel, QPlainTextEdit, QMessageBox
+    QLabel, QPlainTextEdit, QMessageBox, QCheckBox
 )
 
 # WORKER THREAD  
@@ -12,10 +12,11 @@ class FlattenerWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, folders, super_flatten: bool):
+    def __init__(self, folders, super_flatten: bool, dry_run: bool):
         super().__init__()
         self.folders        = folders           
         self.super_flatten  = super_flatten
+        self.dry_run        = dry_run
 
     # ── thread entrypoint
     def run(self):
@@ -23,42 +24,49 @@ class FlattenerWorker(QThread):
             self.progress.emit(f"\n▶ Folder: {folder}")
             for outer_zip in folder.glob("*.zip"):
                 try:
-                    self._flatten_zip(outer_zip)
-                    self.progress.emit(
-                        f"  ✔ {'Super‑' if self.super_flatten else ''}Flattened {outer_zip.name}"
-                    )
+                    has_inner_zips = self._flatten_zip(outer_zip)
+                    tag = " [DRY-RUN]" if self.dry_run else ""
+                    if has_inner_zips:
+                        self.progress.emit(
+                            f"  ✔ {'Super‑' if self.super_flatten else ''}Flattened {outer_zip.name}{tag}"
+                        )
+                    else:
+                        self.progress.emit(
+                            f"  ✔ {outer_zip.name} (no inner zips){tag}"
+                        )
                 except Exception as exc:
-                    self.progress.emit(f"  ✖ {outer_zip.name} → {exc}")
+                    tag = " [DRY-RUN]" if self.dry_run else ""
+                    self.progress.emit(f"  ✖ {outer_zip.name} → {exc}{tag}")
         self.finished.emit()
 
     # core routine
-    def _flatten_zip(self, outer_zip_path: Path) -> None:
+    def _flatten_zip(self, outer_zip_path: Path) -> bool:
         """
         Rewrites *outer_zip_path* so every inner zip is unpacked and –
         if super_flatten is True – any single top‑level folder layer is removed.
+        Returns True if inner zips were found, False otherwise.
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
 
-            
             with zipfile.ZipFile(outer_zip_path) as zf:
                 zf.extractall(tmp_dir)
 
-            
             inner_zips = list(tmp_dir.rglob("*.zip"))
             if not inner_zips:
-                return
+                return False
 
             for inner in inner_zips:
                 with zipfile.ZipFile(inner) as inz:
                     inz.extractall(tmp_dir / inner.stem)
-                inner.unlink()        # delete inner archive
+                inner.unlink()
 
-            
             if self.super_flatten:
                 self._strip_one_folder_level(tmp_dir)
 
-            
+            if self.dry_run:
+                return True
+
             tmp_zip = outer_zip_path.with_suffix(".tmp")
             with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
                 for file in tmp_dir.rglob("*"):
@@ -66,6 +74,7 @@ class FlattenerWorker(QThread):
                         zf.write(file, file.relative_to(tmp_dir))
 
             shutil.move(tmp_zip, outer_zip_path)
+            return True
 
     # helper: move all files up one level, resolve name clashes
     def _strip_one_folder_level(self, root: Path):
@@ -103,6 +112,7 @@ class MainWindow(QMainWindow):
         self.flatten_btn  = QPushButton("Flatten Zips")
         self.sflatten_btn = QPushButton("Super Flatten Zips")
         self.clear_btn    = QPushButton("Clear List")
+        self.dry_run_cb   = QCheckBox("dry-run (log only no write)")
 
         # layout
         lay = QVBoxLayout()
@@ -110,6 +120,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.folder_list, 1)
         lay.addWidget(self.flatten_btn)
         lay.addWidget(self.sflatten_btn)
+        lay.addWidget(self.dry_run_cb)
         lay.addWidget(self.clear_btn)
         lay.addWidget(QLabel("Log:"))
         lay.addWidget(self.log_box, 2)
@@ -142,10 +153,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No folders", "Drag some folders onto the window first.")
             return
 
+        dry_run = self.dry_run_cb.isChecked()
+
         self.flatten_btn.setEnabled(False)
         self.sflatten_btn.setEnabled(False)
 
-        self.worker = FlattenerWorker(folders, super_flatten=super_flat)
+        self.worker = FlattenerWorker(folders, super_flatten=super_flat, dry_run=dry_run)
         self.worker.progress.connect(self.log_box.appendPlainText)
         self.worker.finished.connect(self._done)
         self.worker.start()
